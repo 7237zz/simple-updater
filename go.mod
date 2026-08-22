@@ -1,7 +1,5 @@
 module main
 
-replace github.com/Peiratooo/innoextract-go => ./innoextract-go
-
 go 1.26.5
 
 require (
