@@ -62,8 +62,8 @@ func (c *Client) uploadProduct2DB(product Product) error {
 	return c.Engine.Create(&product).Error
 }
 
-func (c *Client) getLatestProduct() (Product, error) {
+func (c *Client) getLatestProduct(system string, appID string) (Product, error) {
 	var product Product
-	err := c.Engine.Order("created_time desc").First(&product).Error
+	err := c.Engine.Where("system = ? AND app_id = ?", system, appID).Order("created_time desc").First(&product).Error
 	return product, err
 }

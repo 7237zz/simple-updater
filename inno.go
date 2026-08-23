@@ -23,10 +23,6 @@ func AnalyzeInnoSetupEXE(setup *os.File) (*Product, error) {
 		Version: info.AppVersion,
 		Data:    setup,
 	}
-	product.System, err = AnalyzeSystem(setup)
-	if err != nil {
-		return nil, err
-	}
 
 	product.SHA256, err = GenerateSHA256(setup)
 	if err != nil {

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"os"
 
@@ -26,10 +28,28 @@ func New(client *Client) *Client {
 }
 
 func (c *Client) Push(setup *os.File) error {
-	product, err := AnalyzeInnoSetupEXE(setup)
+	if setup == nil {
+		return errors.New("setup file is nil")
+	}
+
+	system, err := AnalyzeSystem(setup)
 	if err != nil {
 		return err
 	}
+
+	var product *Product
+	switch system {
+	case "windows":
+		product, err = AnalyzeInnoSetupEXE(setup)
+	case "darwin":
+		product, err = AnalyzeSetupDMG(setup)
+	default:
+		return fmt.Errorf("unsupported system: %s", system)
+	}
+	if err != nil {
+		return err
+	}
+	product.System = system
 
 	uuidStr, err := uuid.NewRandom()
 	if err != nil {
@@ -42,8 +62,8 @@ func (c *Client) Push(setup *os.File) error {
 	return c.uploadProduct2DB(*product)
 }
 
-func (c *Client) Compare(files []File) ([]File, error) {
-	latest, err := c.getLatestProduct()
+func (c *Client) Compare(system string, appID string, files []File) ([]File, error) {
+	latest, err := c.getLatestProduct(system, appID)
 	if err != nil {
 		return nil, err
 	}

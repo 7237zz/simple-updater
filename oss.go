@@ -51,7 +51,7 @@ func (c *Client) uploadProduct(product *Product) error {
 		return errors.New("product data is nil")
 	}
 
-	prefix := path.Join(c.Folder, product.Version+"-"+product.UUID, product.System)
+	prefix := path.Join(c.Folder, product.Version+"-"+product.System+"-"+product.UUID)
 	productKey := path.Join(prefix, product.FileName)
 
 	if err := c.uploadFile(product.Data, productKey); err != nil {
@@ -157,8 +157,8 @@ func writeTarEntry(writer *tar.Writer, name string, data []byte) error {
 	return nil
 }
 
-func (c *Client) DownloadLatestSetup() (*Product, error) {
-	latest, err := c.getLatestProduct()
+func (c *Client) DownloadLatestSetup(system string, appID string) (*Product, error) {
+	latest, err := c.getLatestProduct(system, appID)
 	if err != nil {
 		return nil, err
 	}
