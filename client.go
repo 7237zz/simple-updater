@@ -1,4 +1,4 @@
-package main
+package simpleupdater
 
 import (
 	"errors"
@@ -75,9 +75,27 @@ func (c *Client) Compare(system string, appID string, files []File) ([]File, err
 	result := make([]File, 0, len(latest.Files))
 	for _, latestFile := range latest.Files {
 		oldFile, exists := oldByPath[latestFile.Path]
-		if !exists || oldFile.SHA256 != latestFile.SHA256 {
+		if !exists || !sameFileState(oldFile, latestFile) {
 			result = append(result, latestFile)
 		}
 	}
 	return result, nil
+}
+
+func sameFileState(current File, latest File) bool {
+	if current.fileType() != latest.fileType() {
+		return false
+	}
+
+	if latest.fileType() == FileTypeSymlink {
+		return current.LinkTarget == latest.LinkTarget
+	}
+
+	if current.SHA256 != latest.SHA256 {
+		return false
+	}
+	if latest.Mode != 0 && current.Mode != latest.Mode {
+		return false
+	}
+	return true
 }

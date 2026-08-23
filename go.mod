@@ -1,4 +1,4 @@
-module main
+module github.com/Peiratooo/simple-updater
 
 go 1.26.5
 

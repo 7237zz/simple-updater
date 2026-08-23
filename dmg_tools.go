@@ -1,4 +1,4 @@
-package main
+package simpleupdater
 
 import (
 	"crypto/sha256"
@@ -24,6 +24,69 @@ type AppInfo struct {
 	AppName    string `plist:"CFBundleName"`
 }
 
+type readLinkFS interface {
+	Readlink(name string) (string, error)
+}
+
+type rootedFS struct {
+	root   fs.FS
+	prefix string
+}
+
+func (r *rootedFS) resolve(name string) (string, error) {
+	if !fs.ValidPath(name) {
+		return "", &fs.PathError{Op: "resolve", Path: name, Err: fs.ErrInvalid}
+	}
+	if name == "." {
+		return r.prefix, nil
+	}
+	return path.Join(r.prefix, name), nil
+}
+
+func (r *rootedFS) Open(name string) (fs.File, error) {
+	resolved, err := r.resolve(name)
+	if err != nil {
+		return nil, err
+	}
+	return r.root.Open(resolved)
+}
+
+func (r *rootedFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	resolved, err := r.resolve(name)
+	if err != nil {
+		return nil, err
+	}
+	return fs.ReadDir(r.root, resolved)
+}
+
+func (r *rootedFS) ReadFile(name string) ([]byte, error) {
+	resolved, err := r.resolve(name)
+	if err != nil {
+		return nil, err
+	}
+	return fs.ReadFile(r.root, resolved)
+}
+
+func (r *rootedFS) Stat(name string) (fs.FileInfo, error) {
+	resolved, err := r.resolve(name)
+	if err != nil {
+		return nil, err
+	}
+	return fs.Stat(r.root, resolved)
+}
+
+func (r *rootedFS) Readlink(name string) (string, error) {
+	resolved, err := r.resolve(name)
+	if err != nil {
+		return "", err
+	}
+	linkFS, ok := r.root.(readLinkFS)
+	if !ok {
+		return "", fmt.Errorf("filesystem does not support symbolic links")
+	}
+	return linkFS.Readlink(resolved)
+}
+
 func ExtractDMGApp(setup *os.File) (fs.FS, func(), error) {
 	if setup == nil {
 		return nil, func() {}, errors.New("setup file is nil")
@@ -39,7 +102,7 @@ func ExtractDMGApp(setup *os.File) (fs.FS, func(), error) {
 	}
 
 	cleanup := func() {
-		closer.Close()
+		_ = closer.Close()
 	}
 
 	var volume fs.FS
@@ -57,7 +120,7 @@ func ExtractDMGApp(setup *os.File) (fs.FS, func(), error) {
 		}
 		oldCleanup := cleanup
 		cleanup = func() {
-			container.Close()
+			_ = container.Close()
 			oldCleanup()
 		}
 
@@ -119,7 +182,7 @@ func findSingleApp(root fs.FS) (fs.FS, error) {
 		return nil, fmt.Errorf("DMG must contain exactly one valid .app, found %d", len(apps))
 	}
 
-	return fs.Sub(root, apps[0])
+	return &rootedFS{root: root, prefix: apps[0]}, nil
 }
 
 func ReadInfoPlist(app fs.FS) (AppInfo, error) {
@@ -149,12 +212,12 @@ func ReadInfoPlist(app fs.FS) (AppInfo, error) {
 
 func ScanRoot(root fs.FS) ([]File, error) {
 	var files []File
+	linkFS, supportsLinks := root.(readLinkFS)
 
 	err := fs.WalkDir(root, ".", func(filePath string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-
 		if entry.IsDir() {
 			return nil
 		}
@@ -162,6 +225,23 @@ func ScanRoot(root fs.FS) ([]File, error) {
 		info, err := entry.Info()
 		if err != nil {
 			return err
+		}
+
+		if info.Mode()&fs.ModeSymlink != 0 {
+			if !supportsLinks {
+				return fmt.Errorf("read symlink %s: filesystem does not support Readlink", filePath)
+			}
+			target, err := linkFS.Readlink(filePath)
+			if err != nil {
+				return fmt.Errorf("read symlink %s: %w", filePath, err)
+			}
+			files = append(files, File{
+				Path:       filePath,
+				Type:       FileTypeSymlink,
+				Mode:       uint32(info.Mode().Perm()),
+				LinkTarget: target,
+			})
+			return nil
 		}
 
 		if !info.Mode().IsRegular() {
@@ -176,6 +256,7 @@ func ScanRoot(root fs.FS) ([]File, error) {
 		hash := sha256.Sum256(data)
 		files = append(files, File{
 			Path:   filePath,
+			Type:   FileTypeRegular,
 			Size:   uint64(info.Size()),
 			SHA256: hex.EncodeToString(hash[:]),
 			Mode:   uint32(info.Mode().Perm()),

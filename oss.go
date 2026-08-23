@@ -1,9 +1,11 @@
-package main
+package simpleupdater
 
 import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,6 +63,9 @@ func (c *Client) uploadProduct(product *Product) error {
 
 	for i := range product.Files {
 		file := &product.Files[i]
+		if file.fileType() == FileTypeSymlink {
+			continue
+		}
 		fileKey := path.Join(prefix, file.Path)
 		fileReader := bytes.NewReader(file.Data)
 		if err := c.uploadFile(fileReader, fileKey); err != nil {
@@ -104,26 +109,56 @@ func (c *Client) DownloadPatch(files []File) ([]byte, error) {
 	archiveNames := map[string]struct{}{"manifest.json": {}}
 
 	for _, file := range files {
-		data, err := c.DownloadFile(file.URL)
+		name, err := cleanArchiveName(file.Path)
 		if err != nil {
-			return nil, fmt.Errorf("download file %s: %w", file.Path, err)
-		}
-
-		name := path.Clean(filepath.ToSlash(file.Path))
-		if filepath.IsAbs(file.Path) || name == "." || name == ".." ||
-			strings.HasPrefix(name, "../") || strings.HasPrefix(name, "/") {
-			return nil, fmt.Errorf("invalid file path: %s", file.Path)
+			return nil, err
 		}
 		if _, exists := archiveNames[name]; exists {
 			return nil, fmt.Errorf("duplicate archive file name: %s", name)
 		}
 		archiveNames[name] = struct{}{}
+
+		if file.fileType() == FileTypeSymlink {
+			if err := validateSymlinkTarget(name, file.LinkTarget); err != nil {
+				return nil, err
+			}
+			mode := int64(file.Mode)
+			if mode == 0 {
+				mode = 0o777
+			}
+			if err := tarWriter.WriteHeader(&tar.Header{
+				Name:     name,
+				Mode:     mode,
+				Typeflag: tar.TypeSymlink,
+				Linkname: file.LinkTarget,
+			}); err != nil {
+				return nil, fmt.Errorf("write symlink tar header %s: %w", name, err)
+			}
+			continue
+		}
+
+		data, err := c.DownloadFile(file.URL)
+		if err != nil {
+			return nil, fmt.Errorf("download file %s: %w", file.Path, err)
+		}
 		if uint64(len(data)) != file.Size {
 			return nil, fmt.Errorf("size mismatch for %s: got %d, want %d", name, len(data), file.Size)
 		}
+		if file.SHA256 != "" {
+			digest := sha256.Sum256(data)
+			actual := hex.EncodeToString(digest[:])
+			if actual != file.SHA256 {
+				return nil, fmt.Errorf("sha256 mismatch for %s: got %s, want %s", name, actual, file.SHA256)
+			}
+		}
+
+		mode := int64(file.Mode)
+		if mode == 0 {
+			mode = 0o644
+		}
 		header := &tar.Header{
 			Name: name,
-			Mode: 0o644,
+			Mode: mode,
 			Size: int64(len(data)),
 		}
 		if err := tarWriter.WriteHeader(header); err != nil {
@@ -141,6 +176,26 @@ func (c *Client) DownloadPatch(files []File) ([]byte, error) {
 		return nil, fmt.Errorf("close gzip: %w", err)
 	}
 	return output.Bytes(), nil
+}
+
+func cleanArchiveName(filePath string) (string, error) {
+	name := path.Clean(filepath.ToSlash(filePath))
+	if filepath.IsAbs(filePath) || name == "." || name == ".." ||
+		strings.HasPrefix(name, "../") || strings.HasPrefix(name, "/") {
+		return "", fmt.Errorf("invalid file path: %s", filePath)
+	}
+	return name, nil
+}
+
+func validateSymlinkTarget(name string, target string) error {
+	if target == "" || path.IsAbs(target) {
+		return fmt.Errorf("invalid symlink target for %s: %s", name, target)
+	}
+	resolved := path.Clean(path.Join(path.Dir(name), target))
+	if resolved == ".." || strings.HasPrefix(resolved, "../") || strings.HasPrefix(resolved, "/") {
+		return fmt.Errorf("symlink target escapes archive root for %s: %s", name, target)
+	}
+	return nil
 }
 
 func writeTarEntry(writer *tar.Writer, name string, data []byte) error {

@@ -1,4 +1,4 @@
-package main
+package simpleupdater
 
 import (
 	"fmt"
@@ -21,14 +21,35 @@ func ReadProductManifest(root string) ([]File, error) {
 		if walkErr != nil {
 			return walkErr
 		}
-		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+		if entry.IsDir() {
 			return nil
 		}
+
+		relativePath, err := filepath.Rel(root, filePath)
+		if err != nil {
+			return fmt.Errorf("get relative path for %s: %w", filePath, err)
+		}
+		relativePath = filepath.ToSlash(relativePath)
 
 		fileInfo, err := entry.Info()
 		if err != nil {
 			return fmt.Errorf("stat %s: %w", filePath, err)
 		}
+
+		if fileInfo.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(filePath)
+			if err != nil {
+				return fmt.Errorf("read symlink %s: %w", filePath, err)
+			}
+			files = append(files, File{
+				Path:       relativePath,
+				Type:       FileTypeSymlink,
+				Mode:       uint32(fileInfo.Mode().Perm()),
+				LinkTarget: target,
+			})
+			return nil
+		}
+
 		if !fileInfo.Mode().IsRegular() {
 			return nil
 		}
@@ -46,12 +67,9 @@ func ReadProductManifest(root string) ([]File, error) {
 			return fmt.Errorf("close %s: %w", filePath, closeErr)
 		}
 
-		relativePath, err := filepath.Rel(root, filePath)
-		if err != nil {
-			return fmt.Errorf("get relative path for %s: %w", filePath, err)
-		}
 		files = append(files, File{
-			Path:   filepath.ToSlash(relativePath),
+			Path:   relativePath,
+			Type:   FileTypeRegular,
 			Size:   uint64(fileInfo.Size()),
 			SHA256: sha256,
 			Mode:   uint32(fileInfo.Mode().Perm()),
@@ -63,5 +81,4 @@ func ReadProductManifest(root string) ([]File, error) {
 	}
 
 	return files, nil
-
 }

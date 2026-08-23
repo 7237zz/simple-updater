@@ -23,5 +23,5 @@ go.work.sum
 
 # env file
 .env
-main.go
-/.idea
+/main.go
+/.idea/

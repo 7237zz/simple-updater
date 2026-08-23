@@ -1,4 +1,4 @@
-package main
+package simpleupdater
 
 import (
 	"fmt"
@@ -12,12 +12,13 @@ import (
 )
 
 type DB struct {
-	Host     string //
-	Port     string //
-	Username string //
-	Password string //
-	Database string //
-	Engine   *gorm.DB
+	Host      string //
+	Port      string //
+	Username  string //
+	Password  string //
+	Database  string //
+	Tablename string //
+	Engine    *gorm.DB
 }
 
 type Product struct {
@@ -51,7 +52,8 @@ func initEngine(db *DB) (*gorm.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = engine.AutoMigrate(&Product{})
+	//err = engine.AutoMigrate(&Product{})
+	err = engine.Table(db.Tablename).AutoMigrate(&Product{})
 	if err != nil {
 		return nil, err
 	}
@@ -59,11 +61,11 @@ func initEngine(db *DB) (*gorm.DB, error) {
 }
 
 func (c *Client) uploadProduct2DB(product Product) error {
-	return c.Engine.Create(&product).Error
+	return c.Engine.Table(c.Tablename).Create(&product).Error
 }
 
 func (c *Client) getLatestProduct(system string, appID string) (Product, error) {
 	var product Product
-	err := c.Engine.Where("system = ? AND app_id = ?", system, appID).Order("created_time desc").First(&product).Error
+	err := c.Engine.Table(c.Tablename).Where("system = ? AND app_id = ?", system, appID).Order("created_time desc").First(&product).Error
 	return product, err
 }

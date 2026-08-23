@@ -1,4 +1,4 @@
-package main
+package simpleupdater
 
 import (
 	"errors"
@@ -40,6 +40,7 @@ func AnalyzeSetupDMG(setup *os.File) (*Product, error) {
 	}
 
 	product.FileName = filepath.Base(setup.Name())
+
 	product.Files, err = ScanRoot(app)
 	if err != nil {
 		return nil, err
