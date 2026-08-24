@@ -4,11 +4,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
+
+const updaterHelperTempPrefix = "simple-updater-helper-"
+const updaterHelperTempDirEnv = "SIMPLE_UPDATER_HELPER_TEMP_DIR"
 
 // UpdaterLaunchOptions describes one handoff from the running application to
 // the tiny updater helper. Script stays in memory and is delivered over stdin.
@@ -21,16 +26,14 @@ type UpdaterLaunchOptions struct {
 	Script      []byte
 }
 
-// StartUpdater starts the updater helper, synchronously writes the complete
-// generated update script to its stdin, closes stdin, and then detaches from
-// the helper process. Once this function returns successfully, the calling
-// application may exit immediately without truncating the update script.
+// StartUpdater starts a temporary copy of the updater helper, synchronously
+// writes the complete generated update script to its stdin, closes stdin, and
+// then detaches from the helper process. Running an isolated copy allows the
+// updater binary in the application install directory to be replaced by the
+// same update transaction.
 //
-// The helper is expected to accept:
-//
-//	updater[.exe] <pid> <install-root> <patch-root> [restart-path]
-//
-// and to execute the script received through stdin.
+// Once this function returns successfully, the calling application may exit
+// immediately without truncating the update script.
 func StartUpdater(options UpdaterLaunchOptions) (int, error) {
 	if strings.TrimSpace(options.UpdaterPath) == "" {
 		return 0, errors.New("updater path is empty")
@@ -46,6 +49,14 @@ func StartUpdater(options UpdaterLaunchOptions) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("resolve updater path: %w", err)
 	}
+	updaterInfo, err := os.Stat(updaterPath)
+	if err != nil {
+		return 0, fmt.Errorf("stat updater: %w", err)
+	}
+	if !updaterInfo.Mode().IsRegular() {
+		return 0, errors.New("updater path is not a regular file")
+	}
+
 	installRoot, err := filepath.Abs(options.InstallRoot)
 	if err != nil {
 		return 0, fmt.Errorf("resolve install root: %w", err)
@@ -74,8 +85,22 @@ func StartUpdater(options UpdaterLaunchOptions) (int, error) {
 		args = append(args, restartPath)
 	}
 
-	cmd := exec.Command(updaterPath, args...)
-	cmd.Dir = filepath.Dir(updaterPath)
+	helperPath, helperDir, err := copyUpdaterToTemp(updaterPath)
+	if err != nil {
+		return 0, err
+	}
+	cleanupHelper := true
+	defer func() {
+		if cleanupHelper {
+			_ = os.RemoveAll(helperDir)
+		}
+	}()
+
+	cmd := exec.Command(helperPath, args...)
+	// Keep the helper's working directory outside its temporary directory so
+	// macOS can remove the temporary helper directory while the process exits.
+	cmd.Dir = installRoot
+	cmd.Env = append(os.Environ(), updaterHelperTempDirEnv+"="+helperDir)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return 0, fmt.Errorf("open updater stdin: %w", err)
@@ -98,12 +123,67 @@ func StartUpdater(options UpdaterLaunchOptions) (int, error) {
 		return 0, fmt.Errorf("close updater stdin: %w", err)
 	}
 
-	// The helper owns the rest of the update lifecycle. Releasing avoids making
-	// the app wait for the update to finish; the app should normally exit now.
+	// The temporary helper owns the rest of the update lifecycle and cleans its
+	// own temporary copy after the script finishes.
 	if err := cmd.Process.Release(); err != nil {
 		return 0, fmt.Errorf("release updater process: %w", err)
 	}
+	cleanupHelper = false
 	return pid, nil
+}
+
+func copyUpdaterToTemp(source string) (string, string, error) {
+	sourceFile, err := os.Open(source)
+	if err != nil {
+		return "", "", fmt.Errorf("open updater: %w", err)
+	}
+	defer sourceFile.Close()
+
+	info, err := sourceFile.Stat()
+	if err != nil {
+		return "", "", fmt.Errorf("stat updater: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", "", errors.New("updater path is not a regular file")
+	}
+
+	tempDir, err := os.MkdirTemp("", updaterHelperTempPrefix)
+	if err != nil {
+		return "", "", fmt.Errorf("create updater temp directory: %w", err)
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.RemoveAll(tempDir)
+		}
+	}()
+
+	name := filepath.Base(source)
+	if runtime.GOOS == "windows" && filepath.Ext(name) == "" {
+		name += ".exe"
+	}
+	destination := filepath.Join(tempDir, name)
+	destinationFile, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
+	if err != nil {
+		return "", "", fmt.Errorf("create temporary updater: %w", err)
+	}
+
+	copyErr := func() error {
+		defer destinationFile.Close()
+		if _, err := io.Copy(destinationFile, sourceFile); err != nil {
+			return err
+		}
+		if err := destinationFile.Sync(); err != nil {
+			return err
+		}
+		return destinationFile.Chmod(0o700)
+	}()
+	if copyErr != nil {
+		return "", "", fmt.Errorf("copy updater to temporary directory: %w", copyErr)
+	}
+
+	ok = true
+	return destination, tempDir, nil
 }
 
 func writeAll(writer io.Writer, data []byte) (int, error) {
@@ -121,14 +201,27 @@ func writeAll(writer io.Writer, data []byte) (int, error) {
 	return written, nil
 }
 
+func normalizeFilesystemPath(path string) string {
+	path = filepath.Clean(path)
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(path)
+	}
+	return path
+}
+
 func sameFilesystemPath(a, b string) bool {
-	return filepath.Clean(a) == filepath.Clean(b)
+	return normalizeFilesystemPath(a) == normalizeFilesystemPath(b)
 }
 
 func pathWithin(candidate, root string) bool {
-	relative, err := filepath.Rel(root, candidate)
-	if err != nil {
-		return false
+	candidate = normalizeFilesystemPath(candidate)
+	root = normalizeFilesystemPath(root)
+	if candidate == root {
+		return true
 	}
-	return relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))
+	separator := string(filepath.Separator)
+	if !strings.HasSuffix(root, separator) {
+		root += separator
+	}
+	return strings.HasPrefix(candidate, root)
 }

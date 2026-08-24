@@ -25,3 +25,6 @@ go.work.sum
 .env
 /main.go
 /.idea/
+
+# Generated updater binaries
+/dist/

@@ -21,7 +21,8 @@ const maxUpdateManifestSize = 64 << 20 // 64 MiB
 //  1. resolves the current application's install root and restart target;
 //  2. reads and validates <updateRoot>/manifest.json;
 //  3. generates the current platform's update script entirely in memory;
-//  4. streams the complete script to updater over stdin;
+//  4. copies updater to an isolated system temporary directory and streams the
+//     complete script to that helper over stdin;
 //  5. terminates the current application after updater has received the script.
 //
 // On Windows, the current executable's directory is treated as InstallRoot and
@@ -99,22 +100,6 @@ func prepareUpdateHandoff(updaterPath, updateRoot string) (int, error) {
 	}
 	if len(manifest) == 0 {
 		return 0, errors.New("update manifest is empty")
-	}
-
-	// Avoid attempting to replace the updater helper itself while it is running.
-	// This matters most on Windows, where an executing image cannot normally be
-	// overwritten. Keeping the rule platform-independent also makes manifests
-	// deterministic across platforms.
-	if pathWithin(updaterPath, installRoot) {
-		relativeUpdater, err := filepath.Rel(installRoot, updaterPath)
-		if err == nil {
-			relativeUpdater = filepath.ToSlash(filepath.Clean(relativeUpdater))
-			for _, file := range manifest {
-				if strings.EqualFold(filepath.ToSlash(filepath.Clean(file.Path)), relativeUpdater) {
-					return 0, fmt.Errorf("manifest attempts to replace the running updater helper: %s", file.Path)
-				}
-			}
-		}
 	}
 
 	script, err := GenerateUpdateScript(runtime.GOOS, manifest)

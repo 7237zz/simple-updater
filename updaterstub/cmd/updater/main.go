@@ -6,16 +6,30 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
 
 const maxScriptSize = 64 << 20 // 64 MiB
+const updaterHelperTempPrefix = "simple-updater-helper-"
+const updaterHelperTempDirEnv = "SIMPLE_UPDATER_HELPER_TEMP_DIR"
 
 func main() {
-	if err := run(os.Args[1:], os.Stdin); err != nil {
+	err := run(os.Args[1:], os.Stdin)
+	cleanupErr := cleanupTemporaryHelper()
+
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "updater:", err)
+		if cleanupErr != nil {
+			fmt.Fprintln(os.Stderr, "updater cleanup:", cleanupErr)
+		}
 		os.Exit(1)
+	}
+	if cleanupErr != nil {
+		// The update itself has already completed. A stale temporary helper is a
+		// cleanup issue, not an update failure.
+		fmt.Fprintln(os.Stderr, "updater cleanup:", cleanupErr)
 	}
 }
 
@@ -64,13 +78,13 @@ func run(args []string, stdin io.Reader) error {
 	// Read the entire script before starting the interpreter. The parent app can
 	// safely exit as soon as this helper has consumed stdin; execution no longer
 	// depends on the parent process or a script file on disk.
-	runtime := runtimeContext{
+	runtimeContext := runtimeContext{
 		PID:         pid,
 		InstallRoot: installRoot,
 		PatchRoot:   patchRoot,
 		RestartPath: restartPath,
 	}
-	return runUpdateScript(script, runtime)
+	return runUpdateScript(script, runtimeContext)
 }
 
 type runtimeContext struct {
@@ -80,6 +94,27 @@ type runtimeContext struct {
 	RestartPath string
 }
 
+func normalizePath(path string) string {
+	path = filepath.Clean(path)
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(path)
+	}
+	return path
+}
+
 func samePath(a, b string) bool {
-	return filepath.Clean(a) == filepath.Clean(b)
+	return normalizePath(a) == normalizePath(b)
+}
+
+func pathWithin(candidate, root string) bool {
+	candidate = normalizePath(candidate)
+	root = normalizePath(root)
+	if candidate == root {
+		return true
+	}
+	separator := string(filepath.Separator)
+	if !strings.HasSuffix(root, separator) {
+		root += separator
+	}
+	return strings.HasPrefix(candidate, root)
 }
