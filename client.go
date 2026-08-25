@@ -27,14 +27,14 @@ func New(client *Client) *Client {
 	return client
 }
 
-func (c *Client) Push(setup *os.File) error {
+func (c *Client) Push(setup *os.File) (*Product, error) {
 	if setup == nil {
-		return errors.New("setup file is nil")
+		return nil, errors.New("setup file is nil")
 	}
 
 	system, err := AnalyzeSystem(setup)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var product *Product
@@ -44,22 +44,30 @@ func (c *Client) Push(setup *os.File) error {
 	case "darwin":
 		product, err = AnalyzeSetupDMG(setup)
 	default:
-		return fmt.Errorf("unsupported system: %s", system)
+		return nil, fmt.Errorf("unsupported system: %s", system)
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	product.System = system
 
 	uuidStr, err := uuid.NewRandom()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	product.UUID = uuidStr.String()
 	if err := c.uploadProduct(product); err != nil {
-		return err
+		return nil, err
 	}
-	return c.uploadProduct2DB(*product)
+	if err := c.uploadProduct2DB(*product); err != nil {
+		return nil, err
+	}
+	for i, _ := range product.Files {
+		product.Files[i].Data = nil
+	}
+	product.Bytes = nil
+	product.Data = nil
+	return product, nil
 }
 
 func (c *Client) Compare(system string, appID string, files []File) ([]File, error) {
@@ -98,4 +106,25 @@ func sameFileState(current File, latest File) bool {
 		return false
 	}
 	return true
+}
+
+func (c *Client) DownloadLatestSetup(system, appID string) (*Product, error) {
+	latest, err := c.getLatestProduct(system, appID)
+	if err != nil {
+		return nil, err
+	}
+	body, err := c.DownloadFile(latest.URL)
+	if err != nil {
+		return nil, err
+	}
+	latest.Bytes = body
+	return &latest, nil
+}
+
+func (c *Client) GetLatestSetupInfo(system, appID string) (*Product, error) {
+	latest, err := c.getLatestProduct(system, appID)
+	if err != nil {
+		return nil, err
+	}
+	return &latest, nil
 }

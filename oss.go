@@ -211,16 +211,3 @@ func writeTarEntry(writer *tar.Writer, name string, data []byte) error {
 	}
 	return nil
 }
-
-func (c *Client) DownloadLatestSetup(system string, appID string) (*Product, error) {
-	latest, err := c.getLatestProduct(system, appID)
-	if err != nil {
-		return nil, err
-	}
-	body, err := c.DownloadFile(latest.URL)
-	if err != nil {
-		return nil, err
-	}
-	latest.Bytes = body
-	return &latest, nil
-}
