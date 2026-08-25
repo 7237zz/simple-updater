@@ -1,5 +1,22 @@
 package simpleupdater
 
+import "io"
+
+// SetupReader is the minimum capability required to inspect an installer
+// without tying the updater to a concrete filesystem-backed file type.
+type SetupReader interface {
+	io.Reader
+	io.ReaderAt
+	io.Seeker
+}
+
+type PackageType string
+
+const (
+	PackageTypeInno PackageType = "inno"
+	PackageTypeDMG  PackageType = "dmg"
+)
+
 type FileType string
 
 const (

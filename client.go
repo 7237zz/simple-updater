@@ -3,8 +3,8 @@ package simpleupdater
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
-	"os"
 
 	"github.com/google/uuid"
 )
@@ -27,46 +27,67 @@ func New(client *Client) *Client {
 	return client
 }
 
-func (c *Client) Push(setup *os.File) (*Product, error) {
+func (c *Client) Push(setup SetupReader) (*Product, error) {
 	if setup == nil {
 		return nil, errors.New("setup file is nil")
 	}
 
-	system, err := AnalyzeSystem(setup)
+	system, packageType, err := AnalyzePackage(setup)
 	if err != nil {
 		return nil, err
 	}
 
 	var product *Product
-	switch system {
-	case "windows":
+	switch packageType {
+	case PackageTypeInno:
 		product, err = AnalyzeInnoSetupEXE(setup)
-	case "darwin":
+	case PackageTypeDMG:
 		product, err = AnalyzeSetupDMG(setup)
 	default:
-		return nil, fmt.Errorf("unsupported system: %s", system)
+		return nil, fmt.Errorf("unsupported package type: %s", packageType)
 	}
 	if err != nil {
 		return nil, err
 	}
+
 	product.System = system
+	product.PackageType = packageType
+
+	product.Size, err = GenerateSize(setup)
+	if err != nil {
+		return nil, err
+	}
+	product.SHA256, err = generateSHA256(setup, product.Size)
+	if err != nil {
+		return nil, err
+	}
+	product.FileName, err = GenerateSetupFileName(product)
+	if err != nil {
+		return nil, err
+	}
+	product.Data = setup
 
 	uuidStr, err := uuid.NewRandom()
 	if err != nil {
 		return nil, err
 	}
 	product.UUID = uuidStr.String()
+
+	if _, err := setup.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("rewind setup before upload: %w", err)
+	}
 	if err := c.uploadProduct(product); err != nil {
 		return nil, err
 	}
 	if err := c.uploadProduct2DB(*product); err != nil {
 		return nil, err
 	}
-	for i, _ := range product.Files {
+
+	for i := range product.Files {
 		product.Files[i].Data = nil
 	}
-	product.Bytes = nil
 	product.Data = nil
+	product.Bytes = nil
 	return product, nil
 }
 

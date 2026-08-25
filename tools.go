@@ -7,12 +7,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"os"
 )
 
-func AnalyzeSystem(file *os.File) (string, error) { // 分析系统
+func AnalyzePackage(file SetupReader) (string, PackageType, error) {
 	if file == nil {
-		return "", fmt.Errorf("file is nil")
+		return "", "", fmt.Errorf("file is nil")
 	}
 
 	const (
@@ -21,72 +20,80 @@ func AnalyzeSystem(file *os.File) (string, error) { // 分析系统
 		dmgFooterSize   = 512
 	)
 
-	// 读取 DOS header
-	var header [dosHeaderSize]byte
-	if _, err := file.ReadAt(header[:], 0); err != nil {
-		return "", fmt.Errorf("read DOS header: %w", err)
-	}
-
-	// 判断 Windows PE (.exe)
-	if bytes.Equal(header[:2], []byte("MZ")) {
-		// PE header offset
-		offset := int64(binary.LittleEndian.Uint32(header[peOffsetAddress:]))
-
-		var pe [4]byte
-		if _, err := file.ReadAt(pe[:], offset); err == nil && bytes.Equal(pe[:], []byte("PE\x00\x00")) {
-			return "windows", nil
-		}
-	}
-
-	// 判断 macOS DMG
-	// DMG 的 koly 标识在文件尾部，需要获取文件大小
-	info, err := file.Stat()
+	size, err := GenerateSize(file)
 	if err != nil {
-		return "", fmt.Errorf("stat file: %w", err)
+		return "", "", err
 	}
-	if info.Size() >= dmgFooterSize {
-		var footer [dmgFooterSize]byte
-		if _, err := file.ReadAt(footer[:], info.Size()-dmgFooterSize); err == nil && bytes.Equal(footer[:4], []byte("koly")) {
-			return "darwin", nil
+
+	if size >= dosHeaderSize {
+		var header [dosHeaderSize]byte
+		if _, err := file.ReadAt(header[:], 0); err == nil && bytes.Equal(header[:2], []byte("MZ")) {
+			offset := int64(binary.LittleEndian.Uint32(header[peOffsetAddress:]))
+			var pe [4]byte
+			if _, err := file.ReadAt(pe[:], offset); err == nil && bytes.Equal(pe[:], []byte("PE\x00\x00")) {
+				return "windows", PackageTypeInno, nil
+			}
 		}
 	}
 
-	return "", fmt.Errorf("unknown system")
+	if size >= dmgFooterSize {
+		var footer [dmgFooterSize]byte
+		if _, err := file.ReadAt(footer[:], size-dmgFooterSize); err == nil && bytes.Equal(footer[:4], []byte("koly")) {
+			return "darwin", PackageTypeDMG, nil
+		}
+	}
+
+	return "", "", fmt.Errorf("unsupported setup package")
 }
 
-func GenerateSHA256(file *os.File) (string, error) {
+func AnalyzeSystem(file SetupReader) (string, error) {
+	system, _, err := AnalyzePackage(file)
+	return system, err
+}
+
+func GenerateSHA256(file SetupReader) (string, error) {
 	if file == nil {
 		return "", fmt.Errorf("file is nil")
 	}
 
-	// 获取文件大小
-	info, err := file.Stat()
+	size, err := GenerateSize(file)
 	if err != nil {
-		return "", fmt.Errorf("stat file: %w", err)
+		return "", err
+	}
+	return generateSHA256(file, size)
+}
+
+func generateSHA256(file io.ReaderAt, size int64) (string, error) {
+	if size < 0 {
+		return "", fmt.Errorf("invalid file size: %d", size)
 	}
 
-	// 创建 SHA256 hash
 	hash := sha256.New()
-
-	// 从文件开头读取，避免改变文件当前偏移
-	reader := io.NewSectionReader(file, 0, info.Size())
+	reader := io.NewSectionReader(file, 0, size)
 	if _, err := io.Copy(hash, reader); err != nil {
 		return "", fmt.Errorf("calculate SHA256: %w", err)
 	}
-
-	// 返回 hex 字符串
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func GenerateSize(file *os.File) (int64, error) {
+func GenerateSize(file io.Seeker) (int64, error) {
 	if file == nil {
 		return 0, fmt.Errorf("file is nil")
 	}
 
-	info, err := file.Stat()
+	current, err := file.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return 0, fmt.Errorf("stat file: %w", err)
+		return 0, fmt.Errorf("get current file offset: %w", err)
 	}
 
-	return info.Size(), nil
+	size, endErr := file.Seek(0, io.SeekEnd)
+	_, restoreErr := file.Seek(current, io.SeekStart)
+	if endErr != nil {
+		return 0, fmt.Errorf("seek file end: %w", endErr)
+	}
+	if restoreErr != nil {
+		return 0, fmt.Errorf("restore file offset: %w", restoreErr)
+	}
+
+	return size, nil
 }

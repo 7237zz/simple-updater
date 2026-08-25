@@ -2,13 +2,12 @@ package simpleupdater
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 
 	"github.com/Peiratooo/innoextract-go"
 )
 
-func AnalyzeInnoSetupEXE(setup *os.File) (*Product, error) {
+func AnalyzeInnoSetupEXE(setup SetupReader) (*Product, error) {
 	if setup == nil {
 		return nil, errors.New("setup file is nil")
 	}
@@ -21,22 +20,8 @@ func AnalyzeInnoSetupEXE(setup *os.File) (*Product, error) {
 	product := &Product{
 		Product: info.AppName,
 		Version: info.AppVersion,
-		Data:    setup,
+		AppID:   info.AppID,
 	}
-
-	product.SHA256, err = GenerateSHA256(setup)
-	if err != nil {
-		return nil, err
-	}
-
-	product.Size, err = GenerateSize(setup)
-	if err != nil {
-		return nil, err
-	}
-
-	product.AppID = info.AppID
-
-	product.FileName = filepath.Base(setup.Name())
 
 	files, err := archive.Extract()
 	if err != nil {

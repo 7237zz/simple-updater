@@ -5,15 +5,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
-	"math"
-	"os"
 	"path"
 	"strings"
 
 	"github.com/deploymenttheory/go-apfs-v2/pkg/apfs"
-	"github.com/deploymenttheory/go-apfs-v2/pkg/disk"
 	"github.com/deploymenttheory/go-apfs-v2/pkg/hfsplus"
 	"howett.net/plist"
 )
@@ -87,41 +83,35 @@ func (r *rootedFS) Readlink(name string) (string, error) {
 	return linkFS.Readlink(resolved)
 }
 
-func ExtractDMGApp(setup *os.File) (fs.FS, func(), error) {
+func ExtractDMGApp(setup SetupReader) (fs.FS, func(), error) {
 	if setup == nil {
 		return nil, func() {}, errors.New("setup file is nil")
 	}
 
-	reader, offset, closer, err := disk.OpenWithOffset(setup.Name())
+	size, err := GenerateSize(setup)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	reader, err := openSetupDMG(setup, size)
 	if err != nil {
 		return nil, func() {}, err
 	}
 
-	if offset != 0 {
-		reader = io.NewSectionReader(reader, offset, math.MaxInt64-offset)
-	}
-
-	cleanup := func() {
-		_ = closer.Close()
-	}
+	cleanup := func() {}
 
 	var volume fs.FS
 	var magic [4]byte
 	if _, err := reader.ReadAt(magic[:], 32); err != nil {
-		cleanup()
 		return nil, func() {}, err
 	}
 
 	if string(magic[:]) == "NXSB" {
 		container, err := apfs.Open(reader, nil)
 		if err != nil {
-			cleanup()
 			return nil, func() {}, err
 		}
-		oldCleanup := cleanup
 		cleanup = func() {
 			_ = container.Close()
-			oldCleanup()
 		}
 
 		volume, err = container.Volume(0)
@@ -132,17 +122,14 @@ func ExtractDMGApp(setup *os.File) (fs.FS, func(), error) {
 	} else {
 		var signature [2]byte
 		if _, err := reader.ReadAt(signature[:], 1024); err != nil {
-			cleanup()
 			return nil, func() {}, err
 		}
 		if string(signature[:]) != "H+" && string(signature[:]) != "HX" {
-			cleanup()
 			return nil, func() {}, errors.New("unsupported DMG filesystem")
 		}
 
 		volume, err = hfsplus.New(reader)
 		if err != nil {
-			cleanup()
 			return nil, func() {}, err
 		}
 	}
