@@ -24,6 +24,10 @@ type UpdaterLaunchOptions struct {
 	PatchRoot   string
 	RestartPath string
 	Script      []byte
+	// Archive is an optional gzip-compressed tar stream. When set, StartUpdater
+	// extracts it into a temporary patch root and generates the update script.
+	// PatchRoot and Script must be empty in archive mode.
+	Archive io.Reader
 }
 
 // StartUpdater starts a temporary copy of the updater helper, synchronously
@@ -35,6 +39,30 @@ type UpdaterLaunchOptions struct {
 // Once this function returns successfully, the calling application may exit
 // immediately without truncating the update script.
 func StartUpdater(options UpdaterLaunchOptions) (int, error) {
+	if options.Archive != nil {
+		if strings.TrimSpace(options.PatchRoot) != "" || len(options.Script) != 0 {
+			return 0, errors.New("archive mode cannot be combined with patch root or script")
+		}
+
+		patchRoot, script, err := prepareArchiveUpdate(options.Archive)
+		if err != nil {
+			return 0, err
+		}
+		options.PatchRoot = patchRoot
+		options.Script = script
+
+		pid, err := startUpdater(options)
+		if err != nil {
+			_ = os.RemoveAll(patchRoot)
+			return 0, err
+		}
+		return pid, nil
+	}
+
+	return startUpdater(options)
+}
+
+func startUpdater(options UpdaterLaunchOptions) (int, error) {
 	if strings.TrimSpace(options.UpdaterPath) == "" {
 		return 0, errors.New("updater path is empty")
 	}
